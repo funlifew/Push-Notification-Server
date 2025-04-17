@@ -1,66 +1,56 @@
 from django.shortcuts import render
-from rest_framework import status
+from rest_framework import generics, status
 from rest_framework.views import Response, APIView
-from rest_framework.permissions import IsAuthenticated
+from utils.utils import resize_and_compress_image
 from .models import AdminToken
-import json
+import json, base64, uuid
 from pywebpush import webpush, WebPushException
 from decouple import config
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from django.core.files.uploadedfile import InMemoryUploadedFile
+
+# Allowed image formats
+ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/jpg']
+
+def convert_to_base64(file):
+    """Convert a file to base64 encoding for embedding in notification."""
+    try:
+        with file.open('rb') as f:
+            encoded_string = base64.b64encode(f.read()).decode("utf-8")
+        return f"data:{file.content_type};base64,{encoded_string}"
+    except Exception as e:
+        print(f"Error converting file to base64: {e}")
+        return None
+
+def prepare_notification_payload(title, body, url=None, icon=None):
+    """Prepare a consistent notification payload format."""
+    payload = {
+        "title": title,
+        "body": body,
+        "url": url,
+        "requireInteraction": True,  # Keep notification visible until user interaction
+        "data": {
+            "url": url  # For click handling in service worker
+        }
+    }
+    
+    if icon:
+        payload["icon"] = icon
+        
+    return json.dumps(payload)
 
 class GenerateAdminTokenView(APIView):
-    """
-    API view for generating new admin tokens.
-    
-    Creates a new AdminToken with a unique UUID and random name.
-    Returns the token value and name to the client.
-    """
     def post(self, request):
-        """
-        POST method to generate a new admin token.
-        
-        Returns:
-            Response: JSON with token and name
-        """
-        # Create a new token
         token = AdminToken.objects.create()
-        
-        # Return the token details
         return Response({
             "token": str(token.token),
             "name": token.name
         }, status=status.HTTP_201_CREATED)
 
-
 class SendSingleNotificationView(APIView):
-    """
-    API view for sending a push notification to a single subscriber.
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
     
-    Requires an admin token for authorization.
-    Sends a web push notification to the provided subscription info.
-    """
     def post(self, request):
-        """
-        POST method to send a notification to a single subscriber.
-        
-        Expected payload:
-        {
-            "admin_token": "uuid-string",
-            "subscription_info": {
-                "endpoint": "https://...",
-                "keys": {
-                    "p256dh": "base64-key",
-                    "auth": "base64-auth"
-                }
-            },
-            "title": "Notification Title",
-            "body": "Notification Body",
-            "icon": "icon-url",  # optional
-            "url": "click-url"   # optional
-        }
-        
-        Returns:
-            Response: Success or error message
-        """
         # Validate admin token
         admin_token = request.data.get("admin_token")
         if not admin_token:
@@ -69,26 +59,52 @@ class SendSingleNotificationView(APIView):
         if not AdminToken.objects.filter(token=admin_token).exists():
             return Response({"admin_token": "admin_token is invalid"}, status=status.HTTP_401_UNAUTHORIZED)
         
-        # Get notification details
-        subscription_info = request.data.get("subscription_info")
+        # Get notification parameters
+        try:
+            subscription_info = json.loads(request.data.get("subscription_info", "{}"))
+        except json.JSONDecodeError:
+            return Response({"subscription_info": "invalid JSON format"}, status=status.HTTP_400_BAD_REQUEST)
+        
         title = request.data.get('title')
         body = request.data.get("body")
-        icon = request.data.get('icon', '')
-        url = request.data.get("url", None)
-        
-        # Validate subscription info
-        if not subscription_info:
-            return Response({"subscription_info": "it's a required field"}, status=status.HTTP_400_BAD_REQUEST)
+        url = request.data.get("url")
+        icon = request.FILES.get("icon")
 
-        # Prepare notification payload
-        payload = json.dumps({
-            "title": title,
-            "body": body,
-            "icon": icon,
-            "url": url,
-        })
+        # Validate required fields
+        if not subscription_info:
+            return Response({"subscription_info": "is a required field"}, status=status.HTTP_400_BAD_REQUEST)
         
-        # Send the notification
+        if not title or not body:
+            return Response({"error": "Title and body are required fields"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Process icon if provided
+        icon_base64 = None
+        if icon:
+            # Validate icon mime type
+            if icon.content_type not in ALLOWED_MIME_TYPES:
+                return Response({
+                    "error": "Unsupported file type. Only JPEG and PNG are allowed."
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Resize and compress
+            try:
+                compressed_image = resize_and_compress_image(icon)
+                compressed_file = InMemoryUploadedFile(
+                    compressed_image,
+                    None,
+                    f"{uuid.uuid4()}.jpg",  # Unique name with jpg extension
+                    'image/jpeg',
+                    compressed_image.getbuffer().nbytes,
+                    None
+                )
+                icon_base64 = convert_to_base64(compressed_file)
+            except Exception as e:
+                print(f"Error processing image: {e}")
+                # Continue without the icon if processing fails
+        
+        # Prepare and send notification
+        payload = prepare_notification_payload(title, body, url, icon_base64)
+        
         try:
             webpush(
                 subscription_info,
@@ -96,43 +112,14 @@ class SendSingleNotificationView(APIView):
                 vapid_private_key=config("VAPID_PRIVATE_KEY"),
                 vapid_claims={"sub": config("VAPID_SUBJECT")}
             )
-            
-            return Response({"message": "notification sent successfully"}, status=status.HTTP_200_OK)
+            return Response({"message": "Notification sent successfully"}, status=status.HTTP_200_OK)
         except WebPushException as ex:
             return Response({"error": str(ex)}, status=status.HTTP_400_BAD_REQUEST)
 
-
 class SendGroupNotificationView(APIView):
-    """
-    API view for sending push notifications to multiple subscribers.
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
     
-    Requires an admin token for authorization.
-    Sends the same notification to multiple subscription endpoints.
-    Collects successes and failures for detailed response.
-    """
     def post(self, request):
-        """
-        POST method to send notifications to multiple subscribers.
-        
-        Expected payload:
-        {
-            "admin_token": "uuid-string",
-            "subscription_info_list": [
-                {
-                    "endpoint": "https://...",
-                    "keys": { "p256dh": "...", "auth": "..." }
-                },
-                ...
-            ],
-            "title": "Notification Title",
-            "body": "Notification Body",
-            "icon": "icon-url",  # optional
-            "url": "click-url"   # optional
-        }
-        
-        Returns:
-            Response: JSON with success and error lists
-        """
         # Validate admin token
         admin_token = request.data.get("admin_token")
         if not admin_token:
@@ -141,33 +128,61 @@ class SendGroupNotificationView(APIView):
         if not AdminToken.objects.filter(token=admin_token).exists():
             return Response({"admin_token": "admin_token is invalid"}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # Get subscription list
-        subscription_info_list = request.data.get("subscription_info_list")
-        if not subscription_info_list or not isinstance(subscription_info_list, list):
-            return Response(
-                {"subscription_info_list": "It is a required field and also it's must be a list"}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Get notification details
+        # Get notification parameters
+        try:
+            subscription_list_str = request.data.get("subscription_info_list", "[]")
+            subscription_info_list = json.loads(subscription_list_str)
+            
+            if not isinstance(subscription_info_list, list) or not subscription_info_list:
+                return Response({
+                    "subscription_info_list": "Must be a non-empty list"
+                }, status=status.HTTP_400_BAD_REQUEST)
+        except json.JSONDecodeError:
+            return Response({
+                "subscription_info_list": "Invalid JSON format"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
         title = request.data.get("title")
         body = request.data.get("body")
-        icon = request.data.get("icon", None)
-        url = request.data.get("url", "")
+        url = request.data.get("url")
+        icon = request.FILES.get("icon")
+        
+        # Validate required fields
+        if not title or not body:
+            return Response({"error": "Title and body are required fields"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Process icon if provided
+        icon_base64 = None
+        if icon:
+            # Validate icon mime type
+            if icon.content_type not in ALLOWED_MIME_TYPES:
+                return Response({
+                    "error": "Unsupported file type. Only JPEG and PNG are allowed."
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Resize and compress
+            try:
+                compressed_image = resize_and_compress_image(icon)
+                compressed_file = InMemoryUploadedFile(
+                    compressed_image,
+                    None,
+                    f"{uuid.uuid4()}.jpg",  # Unique name with jpg extension
+                    'image/jpeg',
+                    compressed_image.getbuffer().nbytes,
+                    None
+                )
+                icon_base64 = convert_to_base64(compressed_file)
+            except Exception as e:
+                print(f"Error processing image: {e}")
+                # Continue without the icon if processing fails
         
         # Prepare notification payload
-        payload = json.dumps({
-            "title": title,
-            "body": body,
-            "icon": icon,
-            "url": url,
-        })
+        payload = prepare_notification_payload(title, body, url, icon_base64)
         
-        # Track successful and failed notifications
+        # Send to all subscriptions
         errors = []
         successes = []
         
-        # Send notifications to each subscription
         for subscription_info in subscription_info_list:
             try:
                 webpush(
@@ -176,12 +191,15 @@ class SendGroupNotificationView(APIView):
                     vapid_private_key=config("VAPID_PRIVATE_KEY"),
                     vapid_claims={"sub": config("VAPID_SUBJECT")}
                 )
-                successes.append(subscription_info['endpoint'])
+                successes.append(subscription_info.get('endpoint', 'unknown'))
             except WebPushException as ex:
-                errors.append(subscription_info['endpoint'])
+                errors.append(subscription_info.get('endpoint', 'unknown'))
+                print(f"Error sending to {subscription_info.get('endpoint', 'unknown')}: {str(ex)}")
         
-        # Return results
         return Response({
             'success': successes,
-            "error": errors
+            'error': errors,
+            'total': len(subscription_info_list),
+            'success_count': len(successes),
+            'error_count': len(errors)
         }, status=status.HTTP_200_OK)
