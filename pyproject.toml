@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "push-notification-server"
+version = "0.1.0"
+description = "This is an server I wrote for Gilasweb for server-side"
+authors = ["Mehdi Radfar <81019265+funlifew@users.noreply.github.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+mysqlclient = "^2.2.7"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
