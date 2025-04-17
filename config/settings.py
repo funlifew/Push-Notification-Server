@@ -5,6 +5,7 @@ This file contains all the configuration settings for the Django project.
 Settings are organized by section for better readability.
 """
 
+import os
 from pathlib import Path
 from datetime import timedelta
 from decouple import config
@@ -19,7 +20,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 # In production, use environment variable instead of hardcoded value
-SECRET_KEY = config('SECRET_KEY', default='django-insecure-&z=a1(jf#+l&b0wjzbs-l^7#&ybq*vny4r!&xf+f)e9z*9s#gu')
+SECRET_KEY = config('SECRET_KEY', default='django-insecure')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=True, cast=bool)
@@ -138,6 +139,9 @@ USE_TZ = True
 # ==============================
 
 STATIC_URL = 'static/'
+
+MEDIA_URL = '/media/'
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 
 # ==============================
