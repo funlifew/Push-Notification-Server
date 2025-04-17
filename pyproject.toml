@@ -20,6 +20,7 @@ py-vapid = "^1.9.2"
 phonenumbers = "^9.0.3"
 django-webpush = "^0.3.6"
 kavenegar = "^1.1.2"
+pillow = "^11.2.1"
 
 
 [build-system]
