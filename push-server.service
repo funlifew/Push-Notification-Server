@@ -1,0 +1,16 @@
+[Unit]
+Description=Push Notification Server
+After=network.target
+
+[Service]
+User=webuser
+Group=www-data
+WorkingDirectory=/path/to/push-notification-server
+ExecStart=/path/to/push-notification-server/.venv/bin/gunicorn \
+          --access-logfile - \
+          --workers 3 \
+          --bind unix:/path/to/push-notification-server/push_server.sock \
+          config.wsgi:application
+
+[Install]
+WantedBy=multi-user.target
